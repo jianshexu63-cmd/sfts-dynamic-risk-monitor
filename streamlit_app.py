@@ -8,7 +8,7 @@ import streamlit as st
 
 
 ROOT = Path(__file__).parent
-APP_BUILD = "2026-07-13-1345"
+APP_BUILD = "2026-07-13-1415"
 
 
 @st.cache_data
@@ -169,6 +169,31 @@ def format_value(value):
     if isinstance(value, float):
         return f"{value:.3g}"
     return str(value)
+
+
+def input_default(value):
+    if not st.session_state.example_mode:
+        return ""
+    return str(value)
+
+
+def parse_optional_float(label, text, errors):
+    text = str(text).strip()
+    if text == "":
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        errors.append(f"{label} must be a number.")
+        return None
+    if value < 0:
+        errors.append(f"{label} cannot be negative.")
+        return None
+    return value
+
+
+def number_text_input(container, label, key, default_value):
+    return container.text_input(label, value=input_default(default_value), key=key)
 
 
 def render_table(headers, rows):
@@ -349,18 +374,43 @@ st.caption(f"Build {APP_BUILD}")
 
 if "panels" not in st.session_state:
     st.session_state.panels = []
+if "example_mode" not in st.session_state:
+    st.session_state.example_mode = False
+if "input_version" not in st.session_state:
+    st.session_state.input_version = 0
 
 left, right = st.columns([1.05, 1])
 
 with left:
     st.subheader("1. Patient profile")
+    tools1, tools2 = st.columns(2)
+    if tools1.button("Load example patient", use_container_width=True):
+        st.session_state.example_mode = True
+        st.session_state.panels = []
+        st.session_state.input_version += 1
+        st.rerun()
+    if tools2.button("Clear inputs", use_container_width=True):
+        st.session_state.example_mode = False
+        st.session_state.panels = []
+        st.session_state.input_version += 1
+        st.rerun()
+    st.caption("Enter real patient values. Leave unavailable values blank.")
+
+    input_errors = []
+    version = st.session_state.input_version
     c1, c2 = st.columns(2)
-    age = c1.number_input("Age, years", min_value=0, max_value=120, value=EXAMPLE["age"], step=1)
-    apache2 = c2.number_input("APACHE II score", min_value=0, max_value=71, value=EXAMPLE["apache2"], step=1)
-    temperature = c1.number_input("Temperature, deg C", min_value=30.0, max_value=45.0, value=float(EXAMPLE["temperature"]), step=0.1)
-    pulse_rate = c2.number_input("Pulse rate, beats/min", min_value=20, max_value=240, value=EXAMPLE["pulse_rate"], step=1)
+    age_text = number_text_input(c1, "Age, years", f"age_{version}", EXAMPLE["age"])
+    apache2_text = number_text_input(c2, "APACHE II score", f"apache2_{version}", EXAMPLE["apache2"])
+    temperature_text = number_text_input(c1, "Temperature, deg C", f"temperature_{version}", EXAMPLE["temperature"])
+    pulse_rate_text = number_text_input(c2, "Pulse rate, beats/min", f"pulse_rate_{version}", EXAMPLE["pulse_rate"])
     hypertension_label = c1.selectbox("Hypertension", ["No", "Yes"], index=int(EXAMPLE["hypertension"]))
     hypertension = 1 if hypertension_label == "Yes" else 0
+    age = parse_optional_float("Age", age_text, input_errors)
+    apache2 = parse_optional_float("APACHE II score", apache2_text, input_errors)
+    temperature = parse_optional_float("Temperature", temperature_text, input_errors)
+    pulse_rate = parse_optional_float("Pulse rate", pulse_rate_text, input_errors)
+    for message in input_errors:
+        st.error(message)
 
     baseline = {
         "age": age,
@@ -387,31 +437,38 @@ with left:
             """,
             unsafe_allow_html=True,
         )
-        with st.form(key=f"panel_form_{next_landmark['id']}"):
+        with st.form(key=f"panel_form_{next_landmark['id']}_{version}"):
             lc1, lc2 = st.columns(2)
             input_values = {}
+            lab_errors = []
             defaults = blank_panel_values(next_index)
             for lab_index, lab in enumerate(CFG["labs"]):
                 column = lc1 if lab_index % 2 == 0 else lc2
-                input_values[lab["key"]] = column.number_input(
+                text_value = number_text_input(
+                    column,
                     f'{LAB_LABELS.get(lab["key"], lab["label"])} ({lab["unit"]})',
-                    min_value=0.0,
-                    value=defaults[lab["key"]],
-                    step=0.1,
-                    key=f'input_{next_landmark["id"]}_{lab["key"]}',
+                    key=f'input_{next_landmark["id"]}_{lab["key"]}_{version}',
+                    default_value=defaults[lab["key"]],
                 )
+                input_values[lab["key"]] = parse_optional_float(LAB_LABELS.get(lab["key"], lab["label"]), text_value, lab_errors)
             submitted = st.form_submit_button("Update risk with this panel", type="primary")
             if submitted:
-                st.session_state.panels.append(
-                    {
-                        "index": next_index,
-                        "landmark_id": next_landmark["id"],
-                        "label": next_landmark["label"],
-                        "hour": next_landmark["hour"],
-                        "values": input_values,
-                    }
-                )
-                st.rerun()
+                if lab_errors:
+                    for message in lab_errors:
+                        st.error(message)
+                elif all(is_missing(value) for value in input_values.values()):
+                    st.warning("Enter at least one laboratory value before updating risk.")
+                else:
+                    st.session_state.panels.append(
+                        {
+                            "index": next_index,
+                            "landmark_id": next_landmark["id"],
+                            "label": next_landmark["label"],
+                            "hour": next_landmark["hour"],
+                            "values": input_values,
+                        }
+                    )
+                    st.rerun()
 
     rc1, rc2 = st.columns(2)
     if rc1.button("Start over", use_container_width=True):
