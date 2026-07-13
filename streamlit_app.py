@@ -8,7 +8,7 @@ import streamlit as st
 
 
 ROOT = Path(__file__).parent
-APP_BUILD = "2026-07-13-1315"
+APP_BUILD = "2026-07-13-1345"
 
 
 @st.cache_data
@@ -187,23 +187,6 @@ def render_table(headers, rows):
     )
 
 
-def render_trajectory_bars(rows):
-    if not rows:
-        return
-    max_risk = max(max(row["risk"] for row in rows), 0.01)
-    marks = ""
-    for row in rows:
-        width = max(4, row["risk"] / max_risk * 100)
-        marks += f"""
-        <div class="traj-row">
-            <div class="traj-label">{html.escape(row["landmark"]["id"])}</div>
-            <div class="traj-bar-wrap"><div class="traj-bar" style="width:{width:.1f}%"></div></div>
-            <div class="traj-value">{row["risk"] * 100:.1f}%</div>
-        </div>
-        """
-    st.markdown(f"<div class='trajectory'>{marks}</div>", unsafe_allow_html=True)
-
-
 def render_curve(rows):
     if len(rows) == 0:
         st.info("Enter the first laboratory panel to generate the initial risk estimate.")
@@ -262,6 +245,36 @@ def render_curve(rows):
     )
 
 
+def render_driver_chart(drivers):
+    if not drivers:
+        st.info("Risk drivers will appear after the first laboratory panel is saved.")
+        return
+
+    max_abs = max(max(abs(driver["contribution"]) for driver in drivers), 0.001)
+    rows = ""
+    for driver in drivers:
+        contribution = driver["contribution"]
+        width = max(3, abs(contribution) / max_abs * 100)
+        direction = "risk-up" if contribution >= 0 else "risk-down"
+        direction_text = "Raises risk" if contribution >= 0 else "Lowers risk"
+        rows += (
+            '<div class="driver-row">'
+            '<div class="driver-label">'
+            f'<div class="driver-name">{html.escape(driver["label"])}</div>'
+            f'<div class="driver-value">Current value: {html.escape(format_value(driver["raw"]))}</div>'
+            '</div>'
+            '<div class="driver-track">'
+            f'<div class="driver-bar {direction}" style="width:{width:.1f}%"></div>'
+            '</div>'
+            '<div class="driver-score">'
+            f'<span>{direction_text}</span>'
+            f'<strong>{contribution:+.3f}</strong>'
+            '</div>'
+            '</div>'
+        )
+    st.markdown(f"<div class='driver-chart'>{rows}</div>", unsafe_allow_html=True)
+
+
 def blank_panel_values(panel_index):
     values = {}
     for lab in CFG["labs"]:
@@ -302,27 +315,36 @@ st.markdown(
     """
     <style>
     .block-container {padding-top: 2rem; max-width: 1180px;}
+    div[data-testid="stMetric"] {background: #f7f8fa; border: 1px solid #e3e7eb; border-radius: 8px; padding: 0.85rem 1rem;}
+    div[data-testid="stMetricValue"] {font-size: 2rem;}
+    .step-chip {display: inline-block; padding: 0.28rem 0.62rem; border: 1px solid #d0d7de; border-radius: 999px; background: #f6f8fa; font-size: 0.86rem; font-weight: 700; color: #24292f; margin-bottom: 0.45rem;}
+    .step-title {font-size: 1.05rem; font-weight: 700; margin: 0.2rem 0 0.6rem;}
+    .hint-text {font-size: 0.9rem; color: #57606a; margin-bottom: 0.75rem;}
     .risk-table {width: 100%; border-collapse: collapse; font-size: 0.92rem;}
     .risk-table th {text-align: left; border-bottom: 2px solid #222; padding: 0.45rem 0.55rem;}
     .risk-table td {border-bottom: 1px solid #ddd; padding: 0.42rem 0.55rem;}
-    .trajectory {margin-top: 0.4rem;}
-    .traj-row {display: grid; grid-template-columns: 68px 1fr 64px; gap: 10px; align-items: center; margin: 0.45rem 0;}
-    .traj-label {font-weight: 600;}
-    .traj-bar-wrap {height: 12px; background: #e8edf2; border-radius: 999px; overflow: hidden;}
-    .traj-bar {height: 12px; background: #ce3f31; border-radius: 999px;}
-    .traj-value {text-align: right; font-variant-numeric: tabular-nums;}
     .risk-curve {width: 100%; height: auto; margin: 0.5rem 0 1rem;}
     .risk-curve .axis {stroke: #333; stroke-width: 1.2;}
     .risk-curve .grid {stroke: #e3e7eb; stroke-width: 1;}
     .risk-curve .tick {font-size: 12px; fill: #4b5563;}
     .risk-curve .curve-label {font-size: 12px; font-weight: 700; fill: #333;}
+    .driver-chart {margin-top: 0.35rem;}
+    .driver-row {display: grid; grid-template-columns: minmax(150px, 1.15fr) minmax(120px, 1.1fr) 96px; gap: 12px; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid #eef1f4;}
+    .driver-name {font-weight: 700; line-height: 1.2;}
+    .driver-value {font-size: 0.82rem; color: #57606a; margin-top: 0.12rem;}
+    .driver-track {height: 12px; background: #edf1f5; border-radius: 999px; overflow: hidden;}
+    .driver-bar {height: 12px; border-radius: 999px;}
+    .driver-bar.risk-up {background: #ce3f31;}
+    .driver-bar.risk-down {background: #4f7cac;}
+    .driver-score {font-size: 0.78rem; color: #57606a; text-align: right;}
+    .driver-score strong {display: block; color: #24292f; font-size: 0.92rem; font-variant-numeric: tabular-nums;}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 st.title("SFTS Dynamic Risk Monitor")
-st.caption("Step-by-step in-hospital mortality risk updating from baseline and newly available laboratory panels.")
+st.caption("Enter each newly available laboratory panel to update the in-hospital mortality risk in real time.")
 st.caption(f"Build {APP_BUILD}")
 
 if "panels" not in st.session_state:
@@ -331,7 +353,7 @@ if "panels" not in st.session_state:
 left, right = st.columns([1.05, 1])
 
 with left:
-    st.subheader("Baseline profile")
+    st.subheader("1. Patient profile")
     c1, c2 = st.columns(2)
     age = c1.number_input("Age, years", min_value=0, max_value=120, value=EXAMPLE["age"], step=1)
     apache2 = c2.number_input("APACHE II score", min_value=0, max_value=71, value=EXAMPLE["apache2"], step=1)
@@ -348,7 +370,7 @@ with left:
         "hypertension": hypertension,
     }
 
-    st.subheader("Laboratory update")
+    st.subheader("2. Enter current laboratory panel")
     next_index = min(len(st.session_state.panels), len(CFG["landmarks"]) - 1)
     all_entered = len(st.session_state.panels) >= len(CFG["landmarks"])
 
@@ -356,7 +378,15 @@ with left:
         st.success("All scheduled laboratory panels have been entered.")
     else:
         next_landmark = CFG["landmarks"][next_index]
-        st.markdown(f"**Current panel to enter:** {next_landmark['label']}")
+        step_number = len(st.session_state.panels) + 1
+        st.markdown(
+            f"""
+            <div class="step-chip">Step {step_number}</div>
+            <div class="step-title">Enter {html.escape(next_landmark['label'])} laboratory values</div>
+            <div class="hint-text">Click the update button after this panel is available. The next panel will open automatically.</div>
+            """,
+            unsafe_allow_html=True,
+        )
         with st.form(key=f"panel_form_{next_landmark['id']}"):
             lc1, lc2 = st.columns(2)
             input_values = {}
@@ -370,7 +400,7 @@ with left:
                     step=0.1,
                     key=f'input_{next_landmark["id"]}_{lab["key"]}',
                 )
-            submitted = st.form_submit_button("Save panel and update risk", type="primary")
+            submitted = st.form_submit_button("Update risk with this panel", type="primary")
             if submitted:
                 st.session_state.panels.append(
                     {
@@ -392,7 +422,7 @@ with left:
         st.rerun()
 
     if st.session_state.panels:
-        st.subheader("Entered panels")
+        st.subheader("Saved laboratory panels")
         render_table(
             ["Panel", "Time", "PLT", "WBC", "LYMPH", "AST", "LDH", "Creatinine", "Urea"],
             saved_panel_rows(st.session_state.panels),
@@ -412,7 +442,7 @@ if st.session_state.panels:
     top_drivers = sorted(current["contributions"], key=lambda item: abs(item["contribution"]), reverse=True)[:10]
 
 with right:
-    st.subheader("Risk dashboard")
+    st.subheader("3. Current risk")
     if current is None:
         st.info("No risk estimate yet. Enter the first laboratory panel and click the update button.")
     else:
@@ -421,7 +451,7 @@ with right:
         m2.metric("Mortality risk", f'{current["risk"] * 100:.1f}%')
         m3.metric("Risk category", risk_stratum(current["risk"]))
 
-    st.subheader("Risk trajectory")
+    st.subheader("Risk trend")
     render_curve(trajectory_rows)
     if trajectory_rows:
         render_table(
@@ -429,16 +459,18 @@ with right:
             [[row["landmark"]["id"], row["hour"], f'{row["risk"] * 100:.1f}%'] for row in trajectory_rows],
         )
 
-    st.subheader("Main risk drivers")
+    st.subheader("Why is the risk changing?")
+    render_driver_chart(top_drivers[:8])
     if top_drivers:
-        render_table(
-            ["Feature", "Current value", "Model contribution"],
-            [
+        with st.expander("Show numeric contribution details"):
+            render_table(
+                ["Feature", "Current value", "Model contribution"],
                 [
-                    driver["label"],
-                    format_value(driver["raw"]),
-                    f'{driver["contribution"]:.4f}',
-                ]
-                for driver in top_drivers
-            ],
-        )
+                    [
+                        driver["label"],
+                        format_value(driver["raw"]),
+                        f'{driver["contribution"]:.4f}',
+                    ]
+                    for driver in top_drivers
+                ],
+            )
