@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import altair as alt
 
 
 ROOT = Path(__file__).parent
@@ -157,9 +158,19 @@ with left:
     hypertension_label = c1.selectbox("高血压", ["无", "有"], index=int(EXAMPLE["hypertension"]))
     hypertension = 1 if hypertension_label == "有" else 0
 
+    st.subheader("Dynamic update")
+    landmark_labels = [item["label"] for item in CFG["landmarks"]]
+    current_landmark_label = st.select_slider(
+        "当前已获得的最新检测时间点",
+        options=landmark_labels,
+        value=landmark_labels[-1],
+    )
+    current_landmark_index = landmark_labels.index(current_landmark_label)
+    active_landmarks = CFG["landmarks"][: current_landmark_index + 1]
+
     st.subheader("Laboratory timeline")
     lab_table = pd.DataFrame(
-        {landmark["id"]: [EXAMPLE[lab["key"]][i] for lab in CFG["labs"]] for i, landmark in enumerate(CFG["landmarks"])},
+        {landmark["id"]: [EXAMPLE[lab["key"]][i] for lab in CFG["labs"]] for i, landmark in enumerate(active_landmarks)},
         index=[f'{lab["label"]} ({lab["unit"]})' for lab in CFG["labs"]],
     )
     edited = st.data_editor(lab_table, use_container_width=True, num_rows="fixed")
@@ -175,13 +186,14 @@ baseline = {
 matrix = {}
 for row_label, lab in zip(edited.index, CFG["labs"]):
     matrix[lab["key"]] = {}
-    for landmark in CFG["landmarks"]:
+    for landmark in active_landmarks:
         matrix[lab["key"]][landmark["id"]] = edited.loc[row_label, landmark["id"]]
 
-results = [calculate_landmark(baseline, matrix, i) for i in range(len(CFG["landmarks"]))]
+results = [calculate_landmark(baseline, matrix, i) for i in range(current_landmark_index + 1)]
 trajectory = pd.DataFrame(
     {
         "Landmark": [r["landmark"]["id"] for r in results],
+        "Hour": [r["landmark"]["hour"] for r in results],
         "Predicted mortality risk": [r["risk"] for r in results],
     }
 )
@@ -199,9 +211,51 @@ with right:
     m1.metric("当前 landmark", current["landmark"]["label"])
     m2.metric("预测死亡风险", f'{current["risk"] * 100:.1f}%')
     m3.metric("风险分层", risk_stratum(current["risk"]))
-    st.line_chart(trajectory, x="Landmark", y="Predicted mortality risk", height=260)
+    risk_chart = (
+        alt.Chart(trajectory)
+        .mark_line(point=True, strokeWidth=3)
+        .encode(
+            x=alt.X(
+                "Landmark:N",
+                sort=[item["id"] for item in active_landmarks],
+                title="Landmark",
+            ),
+            y=alt.Y(
+                "Predicted mortality risk:Q",
+                scale=alt.Scale(domain=[0, 1]),
+                axis=alt.Axis(format="%"),
+                title="Predicted mortality risk",
+            ),
+            tooltip=[
+                alt.Tooltip("Landmark:N", title="Landmark"),
+                alt.Tooltip("Hour:Q", title="Hour"),
+                alt.Tooltip("Predicted mortality risk:Q", title="Risk", format=".1%"),
+            ],
+        )
+        .properties(height=260)
+    )
+    st.altair_chart(risk_chart, use_container_width=True)
     st.subheader("主要风险贡献")
-    st.bar_chart(top_drivers.set_index("label")["contribution"], height=320)
+    driver_chart = (
+        alt.Chart(top_drivers.sort_values("contribution"))
+        .mark_bar()
+        .encode(
+            x=alt.X("contribution:Q", title="Log-odds contribution"),
+            y=alt.Y("label:N", sort=None, title=None),
+            color=alt.condition(
+                alt.datum.contribution >= 0,
+                alt.value("#1f77b4"),
+                alt.value("#d62728"),
+            ),
+            tooltip=[
+                alt.Tooltip("label:N", title="Feature"),
+                alt.Tooltip("raw:Q", title="Raw value", format=".3g"),
+                alt.Tooltip("contribution:Q", title="Contribution", format=".3f"),
+            ],
+        )
+        .properties(height=320)
+    )
+    st.altair_chart(driver_chart, use_container_width=True)
 
 st.warning(
     "本网页仅用于论文研究演示，复现已锁定的 Model 3 计算流程。"
