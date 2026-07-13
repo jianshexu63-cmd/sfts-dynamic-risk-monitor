@@ -1,14 +1,14 @@
+import html
 import json
 import math
 import re
 from pathlib import Path
 
-import pandas as pd
 import streamlit as st
 
 
 ROOT = Path(__file__).parent
-APP_BUILD = "2026-07-13-1200"
+APP_BUILD = "2026-07-13-1230"
 
 
 @st.cache_data
@@ -72,12 +72,20 @@ EXAMPLE = {
 
 
 def logistic(lp):
-    return 1 / (1 + math.exp(-lp))
+    if lp >= 0:
+        z = math.exp(-lp)
+        return 1 / (1 + z)
+    z = math.exp(lp)
+    return z / (1 + z)
+
+
+def is_missing(value):
+    return value is None or value == ""
 
 
 def preprocessed_value(feature, raw_value):
     p = CFG["preprocessing"].get(feature)
-    missing = raw_value is None or pd.isna(raw_value)
+    missing = is_missing(raw_value)
     value = p.get("imputationValue") if missing and p else raw_value
 
     if not p:
@@ -97,7 +105,7 @@ def lab_history_feature(matrix, lab, landmark_index, feature_type):
     values = []
     for landmark in CFG["landmarks"][: landmark_index + 1]:
         value = matrix[lab].get(landmark["id"])
-        if value is not None and not pd.isna(value):
+        if not is_missing(value):
             values.append({"value": float(value), "hour": landmark["hour"]})
 
     if feature_type == "latest":
@@ -114,7 +122,10 @@ def lab_history_feature(matrix, lab, landmark_index, feature_type):
 def raw_feature_value(feature, baseline, matrix, landmark_index):
     if feature in baseline:
         return baseline[feature]
-    match = re.match(r"^(PLT|WBC|LYMPH_ABS|AST|LDH|CREA|UREA)_(latest|change_from_first|measure_n_so_far|time_since_last)$", feature)
+    match = re.match(
+        r"^(PLT|WBC|LYMPH_ABS|AST|LDH|CREA|UREA)_(latest|change_from_first|measure_n_so_far|time_since_last)$",
+        feature,
+    )
     if match:
         return lab_history_feature(matrix, match.group(1), landmark_index, match.group(2))
     return None
@@ -152,17 +163,66 @@ def risk_stratum(risk):
     return CFG["riskStrata"][-1].get("name", CFG["riskStrata"][-1]["label"])
 
 
+def format_value(value):
+    if is_missing(value):
+        return ""
+    if isinstance(value, float):
+        return f"{value:.3g}"
+    return str(value)
 
-def build_matrix(edited, active_landmarks):
-    matrix = {lab["key"]: {} for lab in CFG["labs"]}
-    for row_label, lab in zip(edited.index, CFG["labs"]):
-        for landmark in active_landmarks:
-            value = edited.loc[row_label, landmark["id"]]
-            matrix[lab["key"]][landmark["id"]] = value
-    return matrix
+
+def render_table(headers, rows):
+    header_html = "".join(f"<th>{html.escape(str(h))}</th>" for h in headers)
+    body_html = ""
+    for row in rows:
+        body_html += "<tr>" + "".join(f"<td>{html.escape(str(c))}</td>" for c in row) + "</tr>"
+    st.markdown(
+        f"""
+        <table class="risk-table">
+            <thead><tr>{header_html}</tr></thead>
+            <tbody>{body_html}</tbody>
+        </table>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_trajectory(rows):
+    if not rows:
+        return
+    max_risk = max(max(row["risk"] for row in rows), 0.01)
+    marks = ""
+    for row in rows:
+        width = max(4, row["risk"] / max_risk * 100)
+        marks += f"""
+        <div class="traj-row">
+            <div class="traj-label">{html.escape(row["landmark"]["id"])}</div>
+            <div class="traj-bar-wrap"><div class="traj-bar" style="width:{width:.1f}%"></div></div>
+            <div class="traj-value">{row["risk"] * 100:.1f}%</div>
+        </div>
+        """
+    st.markdown(f"<div class='trajectory'>{marks}</div>", unsafe_allow_html=True)
 
 
 st.set_page_config(page_title="SFTS Dynamic Risk Monitor", layout="wide")
+st.markdown(
+    """
+    <style>
+    .block-container {padding-top: 2rem; max-width: 1180px;}
+    .risk-table {width: 100%; border-collapse: collapse; font-size: 0.92rem;}
+    .risk-table th {text-align: left; border-bottom: 2px solid #222; padding: 0.45rem 0.55rem;}
+    .risk-table td {border-bottom: 1px solid #ddd; padding: 0.42rem 0.55rem;}
+    .trajectory {margin-top: 0.4rem;}
+    .traj-row {display: grid; grid-template-columns: 68px 1fr 64px; gap: 10px; align-items: center; margin: 0.45rem 0;}
+    .traj-label {font-weight: 600;}
+    .traj-bar-wrap {height: 12px; background: #e8edf2; border-radius: 999px; overflow: hidden;}
+    .traj-bar {height: 12px; background: #ce3f31; border-radius: 999px;}
+    .traj-value {text-align: right; font-variant-numeric: tabular-nums;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("SFTS Dynamic Risk Monitor")
 st.caption("Sequential in-hospital mortality risk updating from baseline and repeated laboratory measurements.")
 st.caption(f"Build {APP_BUILD}")
@@ -189,40 +249,30 @@ with left:
 
     st.subheader("Laboratory update")
     landmark_options = [item["label"] for item in CFG["landmarks"]]
-    latest_label = st.selectbox(
-        "Latest available laboratory panel",
-        landmark_options,
-        index=0,
-    )
+    latest_label = st.selectbox("Latest available laboratory panel", landmark_options, index=0)
     latest_index = landmark_options.index(latest_label)
     active_landmarks = CFG["landmarks"][: latest_index + 1]
 
-    lab_table = pd.DataFrame(
-        {
-            landmark["id"]: [EXAMPLE[lab["key"]][i] for lab in CFG["labs"]]
-            for i, landmark in enumerate(active_landmarks)
-        },
-        index=[f'{LAB_LABELS.get(lab["key"], lab["label"])} ({lab["unit"]})' for lab in CFG["labs"]],
-    )
-    edited = st.data_editor(lab_table, use_container_width=True, num_rows="fixed", key="lab_table")
-    update_clicked = st.button("Update risk", type="primary", use_container_width=True)
+    matrix = {lab["key"]: {} for lab in CFG["labs"]}
+    for landmark_index, landmark in enumerate(active_landmarks):
+        with st.expander(landmark["label"], expanded=landmark_index == latest_index):
+            lc1, lc2 = st.columns(2)
+            for lab_index, lab in enumerate(CFG["labs"]):
+                column = lc1 if lab_index % 2 == 0 else lc2
+                matrix[lab["key"]][landmark["id"]] = column.number_input(
+                    f'{LAB_LABELS.get(lab["key"], lab["label"])} ({lab["unit"]})',
+                    min_value=0.0,
+                    value=float(EXAMPLE[lab["key"]][landmark_index]),
+                    step=0.1,
+                    key=f'{lab["key"]}_{landmark["id"]}',
+                )
 
-matrix = build_matrix(edited, active_landmarks)
+    st.button("Update risk", type="primary")
+
 results = [calculate_landmark(baseline, matrix, i) for i in range(latest_index + 1)]
-trajectory = pd.DataFrame(
-    {
-        "Landmark": [r["landmark"]["id"] for r in results],
-        "Hour": [r["landmark"]["hour"] for r in results],
-        "Predicted mortality risk": [r["risk"] for r in results],
-    }
-).sort_values("Hour")
 current = results[-1]
-top_drivers = (
-    pd.DataFrame(current["contributions"])
-    .assign(abs_contribution=lambda x: x["contribution"].abs())
-    .sort_values("abs_contribution", ascending=False)
-    .head(10)
-)
+trajectory_rows = [{"landmark": r["landmark"], "hour": r["landmark"]["hour"], "risk": r["risk"]} for r in results]
+top_drivers = sorted(current["contributions"], key=lambda item: abs(item["contribution"]), reverse=True)[:10]
 
 with right:
     st.subheader("Risk dashboard")
@@ -231,17 +281,22 @@ with right:
     m2.metric("Mortality risk", f'{current["risk"] * 100:.1f}%')
     m3.metric("Risk category", risk_stratum(current["risk"]))
 
-    chart_data = trajectory.set_index("Hour")[["Predicted mortality risk"]]
-    st.line_chart(chart_data, height=260)
-
     st.subheader("Risk trajectory")
-    display_trajectory = trajectory.copy()
-    display_trajectory["Predicted mortality risk"] = display_trajectory["Predicted mortality risk"].map(lambda x: f"{x * 100:.1f}%")
-    st.dataframe(display_trajectory[["Landmark", "Hour", "Predicted mortality risk"]], use_container_width=True, hide_index=True)
+    render_trajectory(trajectory_rows)
+    render_table(
+        ["Landmark", "Hour", "Predicted mortality risk"],
+        [[row["landmark"]["id"], row["hour"], f'{row["risk"] * 100:.1f}%'] for row in trajectory_rows],
+    )
 
     st.subheader("Main risk drivers")
-    driver_table = top_drivers[["label", "raw", "contribution"]].rename(
-        columns={"label": "Feature", "raw": "Current value", "contribution": "Model contribution"}
+    render_table(
+        ["Feature", "Current value", "Model contribution"],
+        [
+            [
+                driver["label"],
+                format_value(driver["raw"]),
+                f'{driver["contribution"]:.4f}',
+            ]
+            for driver in top_drivers
+        ],
     )
-    driver_table["Model contribution"] = driver_table["Model contribution"].map(lambda x: round(float(x), 4))
-    st.dataframe(driver_table, use_container_width=True, hide_index=True)
