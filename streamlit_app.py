@@ -151,31 +151,17 @@ def risk_stratum(risk):
     return CFG["riskStrata"][-1].get("name", CFG["riskStrata"][-1]["label"])
 
 
-def empty_matrix():
-    return {lab["key"]: {} for lab in CFG["labs"]}
 
-
-def saved_matrix():
-    matrix = empty_matrix()
-    for landmark_id, values in st.session_state.lab_records.items():
-        for lab in CFG["labs"]:
-            matrix[lab["key"]][landmark_id] = values.get(lab["key"])
+def build_matrix(edited, active_landmarks):
+    matrix = {lab["key"]: {} for lab in CFG["labs"]}
+    for row_label, lab in zip(edited.index, CFG["labs"]):
+        for landmark in active_landmarks:
+            value = edited.loc[row_label, landmark["id"]]
+            matrix[lab["key"]][landmark["id"]] = value
     return matrix
 
 
-def recorded_landmark_indices():
-    saved_ids = set(st.session_state.lab_records)
-    return [i for i, item in enumerate(CFG["landmarks"]) if item["id"] in saved_ids]
-
-
-def reset_patient():
-    st.session_state.lab_records = {}
-
-
 st.set_page_config(page_title="SFTS Dynamic Risk Monitor", layout="wide")
-if "lab_records" not in st.session_state:
-    st.session_state.lab_records = {}
-
 st.title("SFTS Dynamic Risk Monitor")
 st.caption("Sequential in-hospital mortality risk updating from baseline and repeated laboratory measurements.")
 
@@ -199,90 +185,61 @@ with left:
         "hypertension": hypertension,
     }
 
-    next_index = min(len(st.session_state.lab_records), len(CFG["landmarks"]) - 1)
-    current_landmark = CFG["landmarks"][next_index]
+    st.subheader("Laboratory update")
+    landmark_options = [item["label"] for item in CFG["landmarks"]]
+    latest_label = st.selectbox(
+        "Latest available laboratory panel",
+        landmark_options,
+        index=0,
+    )
+    latest_index = landmark_options.index(latest_label)
+    active_landmarks = CFG["landmarks"][: latest_index + 1]
 
-    st.subheader("New laboratory update")
-    st.write(f'Current update: **{current_landmark["label"]}**')
+    lab_table = pd.DataFrame(
+        {
+            landmark["id"]: [EXAMPLE[lab["key"]][i] for lab in CFG["labs"]]
+            for i, landmark in enumerate(active_landmarks)
+        },
+        index=[f'{LAB_LABELS.get(lab["key"], lab["label"])} ({lab["unit"]})' for lab in CFG["labs"]],
+    )
+    edited = st.data_editor(lab_table, use_container_width=True, num_rows="fixed", key="lab_table")
+    update_clicked = st.button("Update risk", type="primary", use_container_width=True)
 
-    lab_values = {}
-    lc1, lc2 = st.columns(2)
-    for i, lab in enumerate(CFG["labs"]):
-        default_value = float(EXAMPLE[lab["key"]][next_index])
-        target = lc1 if i % 2 == 0 else lc2
-        lab_values[lab["key"]] = target.number_input(
-            f'{LAB_LABELS.get(lab["key"], lab["label"])} ({lab["unit"]})',
-            value=default_value,
-            step=0.01,
-            format="%.3f",
-            key=f'{current_landmark["id"]}_{lab["key"]}',
-        )
-
-    b1, b2 = st.columns([1, 1])
-    if b1.button("Update risk", type="primary", use_container_width=True):
-        st.session_state.lab_records[current_landmark["id"]] = lab_values
-        st.rerun()
-    if b2.button("Reset patient", use_container_width=True):
-        reset_patient()
-        st.rerun()
-
-    st.subheader("Entered laboratory history")
-    if st.session_state.lab_records:
-        history = pd.DataFrame(
-            {
-                item["id"]: [
-                    st.session_state.lab_records.get(item["id"], {}).get(lab["key"])
-                    for lab in CFG["labs"]
-                ]
-                for item in CFG["landmarks"]
-                if item["id"] in st.session_state.lab_records
-            },
-            index=[f'{LAB_LABELS.get(lab["key"], lab["label"])} ({lab["unit"]})' for lab in CFG["labs"]],
-        )
-        st.dataframe(history, use_container_width=True)
-    else:
-        st.info("Enter the first laboratory panel and click Update risk.")
-
-matrix = saved_matrix()
-indices = recorded_landmark_indices()
-results = [calculate_landmark(baseline, matrix, i) for i in indices]
+matrix = build_matrix(edited, active_landmarks)
+results = [calculate_landmark(baseline, matrix, i) for i in range(latest_index + 1)]
+trajectory = pd.DataFrame(
+    {
+        "Landmark": [r["landmark"]["id"] for r in results],
+        "Hour": [r["landmark"]["hour"] for r in results],
+        "Predicted mortality risk": [r["risk"] for r in results],
+    }
+).sort_values("Hour")
+current = results[-1]
+top_drivers = (
+    pd.DataFrame(current["contributions"])
+    .assign(abs_contribution=lambda x: x["contribution"].abs())
+    .sort_values("abs_contribution", ascending=False)
+    .head(10)
+)
 
 with right:
     st.subheader("Risk dashboard")
-    if not results:
-        st.metric("Latest risk", "Not calculated")
-        st.write("The first risk estimate will appear after the L0 laboratory panel is entered.")
-    else:
-        trajectory = pd.DataFrame(
-            {
-                "Landmark": [r["landmark"]["id"] for r in results],
-                "Hour": [r["landmark"]["hour"] for r in results],
-                "Predicted mortality risk": [r["risk"] for r in results],
-            }
-        ).sort_values("Hour")
-        current = results[-1]
-        top_drivers = (
-            pd.DataFrame(current["contributions"])
-            .assign(abs_contribution=lambda x: x["contribution"].abs())
-            .sort_values("abs_contribution", ascending=False)
-            .head(10)
-        )
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Latest update", current["landmark"]["label"])
+    m2.metric("Mortality risk", f'{current["risk"] * 100:.1f}%')
+    m3.metric("Risk category", risk_stratum(current["risk"]))
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Latest update", current["landmark"]["label"])
-        m2.metric("Mortality risk", f'{current["risk"] * 100:.1f}%')
-        m3.metric("Risk category", risk_stratum(current["risk"]))
+    chart_data = trajectory.set_index("Hour")[["Predicted mortality risk"]]
+    st.line_chart(chart_data, height=260)
 
-        chart_data = trajectory.set_index("Hour")[["Predicted mortality risk"]]
-        st.line_chart(chart_data, height=260)
+    st.subheader("Risk trajectory")
+    display_trajectory = trajectory.copy()
+    display_trajectory["Predicted mortality risk"] = display_trajectory["Predicted mortality risk"].map(lambda x: f"{x * 100:.1f}%")
+    st.dataframe(display_trajectory[["Landmark", "Hour", "Predicted mortality risk"]], use_container_width=True, hide_index=True)
 
-        st.subheader("Risk trajectory")
-        display_trajectory = trajectory.copy()
-        display_trajectory["Predicted mortality risk"] = display_trajectory["Predicted mortality risk"].map(lambda x: f"{x * 100:.1f}%")
-        st.dataframe(display_trajectory[["Landmark", "Hour", "Predicted mortality risk"]], use_container_width=True, hide_index=True)
-
-        st.subheader("Main risk drivers")
-        driver_table = top_drivers[["label", "raw", "contribution"]].rename(
-            columns={"label": "Feature", "raw": "Current value", "contribution": "Model contribution"}
-        )
-        st.dataframe(driver_table, use_container_width=True, hide_index=True)
+    st.subheader("Main risk drivers")
+    driver_table = top_drivers[["label", "raw", "contribution"]].rename(
+        columns={"label": "Feature", "raw": "Current value", "contribution": "Model contribution"}
+    )
+    driver_table["Model contribution"] = driver_table["Model contribution"].map(lambda x: round(float(x), 4))
+    st.dataframe(driver_table, use_container_width=True, hide_index=True)
