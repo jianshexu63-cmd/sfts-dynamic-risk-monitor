@@ -8,6 +8,7 @@ import streamlit as st
 
 
 ROOT = Path(__file__).parent
+APP_BUILD = "2026-07-13-1200"
 
 
 @st.cache_data
@@ -164,6 +165,7 @@ def build_matrix(edited, active_landmarks):
 st.set_page_config(page_title="SFTS Dynamic Risk Monitor", layout="wide")
 st.title("SFTS Dynamic Risk Monitor")
 st.caption("Sequential in-hospital mortality risk updating from baseline and repeated laboratory measurements.")
+st.caption(f"Build {APP_BUILD}")
 
 left, right = st.columns([1.05, 1])
 
