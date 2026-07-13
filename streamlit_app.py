@@ -8,7 +8,7 @@ import streamlit as st
 
 
 ROOT = Path(__file__).parent
-APP_BUILD = "2026-07-13-1230"
+APP_BUILD = "2026-07-13-1315"
 
 
 @st.cache_data
@@ -187,7 +187,7 @@ def render_table(headers, rows):
     )
 
 
-def render_trajectory(rows):
+def render_trajectory_bars(rows):
     if not rows:
         return
     max_risk = max(max(row["risk"] for row in rows), 0.01)
@@ -204,6 +204,99 @@ def render_trajectory(rows):
     st.markdown(f"<div class='trajectory'>{marks}</div>", unsafe_allow_html=True)
 
 
+def render_curve(rows):
+    if len(rows) == 0:
+        st.info("Enter the first laboratory panel to generate the initial risk estimate.")
+        return
+
+    width, height = 520, 240
+    left, right, top, bottom = 48, 18, 22, 38
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    max_hour = max(row["hour"] for row in rows) or 24
+    max_risk = max(max(row["risk"] for row in rows), 0.05)
+    y_max = min(1.0, max(0.3, math.ceil(max_risk * 10) / 10))
+
+    points = []
+    dots = []
+    labels = []
+    for row in rows:
+        x = left + (row["hour"] / max_hour) * plot_w
+        y = top + (1 - row["risk"] / y_max) * plot_h
+        points.append(f"{x:.1f},{y:.1f}")
+        dots.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="#ce3f31" />')
+        labels.append(
+            f'<text x="{x:.1f}" y="{y - 10:.1f}" text-anchor="middle" class="curve-label">'
+            f'{row["risk"] * 100:.1f}%</text>'
+        )
+
+    x_axis = f'<line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" y2="{top + plot_h}" class="axis" />'
+    y_axis = f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" class="axis" />'
+    grid = ""
+    y_ticks = []
+    for frac in [0, 0.25, 0.5, 0.75, 1.0]:
+        y = top + (1 - frac) * plot_h
+        value = frac * y_max
+        grid += f'<line x1="{left}" y1="{y:.1f}" x2="{left + plot_w}" y2="{y:.1f}" class="grid" />'
+        y_ticks.append(f'<text x="{left - 8}" y="{y + 4:.1f}" text-anchor="end" class="tick">{value * 100:.0f}%</text>')
+
+    x_labels = ""
+    for row in rows:
+        x = left + (row["hour"] / max_hour) * plot_w
+        x_labels += f'<text x="{x:.1f}" y="{top + plot_h + 24}" text-anchor="middle" class="tick">{html.escape(row["landmark"]["id"])}</text>'
+
+    st.markdown(
+        f"""
+        <svg class="risk-curve" viewBox="0 0 {width} {height}" role="img" aria-label="Risk trajectory">
+            {grid}
+            {x_axis}
+            {y_axis}
+            {''.join(y_ticks)}
+            {x_labels}
+            <polyline points="{' '.join(points)}" fill="none" stroke="#ce3f31" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
+            {''.join(dots)}
+            {''.join(labels)}
+        </svg>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def blank_panel_values(panel_index):
+    values = {}
+    for lab in CFG["labs"]:
+        values[lab["key"]] = float(EXAMPLE[lab["key"]][panel_index])
+    return values
+
+
+def build_matrix_from_panels(panels):
+    matrix = {lab["key"]: {} for lab in CFG["labs"]}
+    for panel in panels:
+        for lab in CFG["labs"]:
+            matrix[lab["key"]][panel["landmark_id"]] = panel["values"].get(lab["key"])
+    return matrix
+
+
+def saved_panel_rows(panels):
+    rows = []
+    for panel in panels:
+        values = panel["values"]
+        rows.append(
+            [
+                panel["landmark_id"],
+                panel["label"],
+                format_value(values.get("PLT")),
+                format_value(values.get("WBC")),
+                format_value(values.get("LYMPH_ABS")),
+                format_value(values.get("AST")),
+                format_value(values.get("LDH")),
+                format_value(values.get("CREA")),
+                format_value(values.get("UREA")),
+            ]
+        )
+    return rows
+
+
 st.set_page_config(page_title="SFTS Dynamic Risk Monitor", layout="wide")
 st.markdown(
     """
@@ -218,14 +311,22 @@ st.markdown(
     .traj-bar-wrap {height: 12px; background: #e8edf2; border-radius: 999px; overflow: hidden;}
     .traj-bar {height: 12px; background: #ce3f31; border-radius: 999px;}
     .traj-value {text-align: right; font-variant-numeric: tabular-nums;}
+    .risk-curve {width: 100%; height: auto; margin: 0.5rem 0 1rem;}
+    .risk-curve .axis {stroke: #333; stroke-width: 1.2;}
+    .risk-curve .grid {stroke: #e3e7eb; stroke-width: 1;}
+    .risk-curve .tick {font-size: 12px; fill: #4b5563;}
+    .risk-curve .curve-label {font-size: 12px; font-weight: 700; fill: #333;}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 st.title("SFTS Dynamic Risk Monitor")
-st.caption("Sequential in-hospital mortality risk updating from baseline and repeated laboratory measurements.")
+st.caption("Step-by-step in-hospital mortality risk updating from baseline and newly available laboratory panels.")
 st.caption(f"Build {APP_BUILD}")
+
+if "panels" not in st.session_state:
+    st.session_state.panels = []
 
 left, right = st.columns([1.05, 1])
 
@@ -248,55 +349,96 @@ with left:
     }
 
     st.subheader("Laboratory update")
-    landmark_options = [item["label"] for item in CFG["landmarks"]]
-    latest_label = st.selectbox("Latest available laboratory panel", landmark_options, index=0)
-    latest_index = landmark_options.index(latest_label)
-    active_landmarks = CFG["landmarks"][: latest_index + 1]
+    next_index = min(len(st.session_state.panels), len(CFG["landmarks"]) - 1)
+    all_entered = len(st.session_state.panels) >= len(CFG["landmarks"])
 
-    matrix = {lab["key"]: {} for lab in CFG["labs"]}
-    for landmark_index, landmark in enumerate(active_landmarks):
-        with st.expander(landmark["label"], expanded=landmark_index == latest_index):
+    if all_entered:
+        st.success("All scheduled laboratory panels have been entered.")
+    else:
+        next_landmark = CFG["landmarks"][next_index]
+        st.markdown(f"**Current panel to enter:** {next_landmark['label']}")
+        with st.form(key=f"panel_form_{next_landmark['id']}"):
             lc1, lc2 = st.columns(2)
+            input_values = {}
+            defaults = blank_panel_values(next_index)
             for lab_index, lab in enumerate(CFG["labs"]):
                 column = lc1 if lab_index % 2 == 0 else lc2
-                matrix[lab["key"]][landmark["id"]] = column.number_input(
+                input_values[lab["key"]] = column.number_input(
                     f'{LAB_LABELS.get(lab["key"], lab["label"])} ({lab["unit"]})',
                     min_value=0.0,
-                    value=float(EXAMPLE[lab["key"]][landmark_index]),
+                    value=defaults[lab["key"]],
                     step=0.1,
-                    key=f'{lab["key"]}_{landmark["id"]}',
+                    key=f'input_{next_landmark["id"]}_{lab["key"]}',
                 )
+            submitted = st.form_submit_button("Save panel and update risk", type="primary")
+            if submitted:
+                st.session_state.panels.append(
+                    {
+                        "index": next_index,
+                        "landmark_id": next_landmark["id"],
+                        "label": next_landmark["label"],
+                        "hour": next_landmark["hour"],
+                        "values": input_values,
+                    }
+                )
+                st.rerun()
 
-    st.button("Update risk", type="primary")
+    rc1, rc2 = st.columns(2)
+    if rc1.button("Start over", use_container_width=True):
+        st.session_state.panels = []
+        st.rerun()
+    if rc2.button("Remove last panel", use_container_width=True, disabled=len(st.session_state.panels) == 0):
+        st.session_state.panels = st.session_state.panels[:-1]
+        st.rerun()
 
-results = [calculate_landmark(baseline, matrix, i) for i in range(latest_index + 1)]
-current = results[-1]
-trajectory_rows = [{"landmark": r["landmark"], "hour": r["landmark"]["hour"], "risk": r["risk"]} for r in results]
-top_drivers = sorted(current["contributions"], key=lambda item: abs(item["contribution"]), reverse=True)[:10]
+    if st.session_state.panels:
+        st.subheader("Entered panels")
+        render_table(
+            ["Panel", "Time", "PLT", "WBC", "LYMPH", "AST", "LDH", "Creatinine", "Urea"],
+            saved_panel_rows(st.session_state.panels),
+        )
+
+results = []
+trajectory_rows = []
+top_drivers = []
+current = None
+if st.session_state.panels:
+    matrix = build_matrix_from_panels(st.session_state.panels)
+    for panel in st.session_state.panels:
+        result = calculate_landmark(baseline, matrix, panel["index"])
+        results.append(result)
+    current = results[-1]
+    trajectory_rows = [{"landmark": r["landmark"], "hour": r["landmark"]["hour"], "risk": r["risk"]} for r in results]
+    top_drivers = sorted(current["contributions"], key=lambda item: abs(item["contribution"]), reverse=True)[:10]
 
 with right:
     st.subheader("Risk dashboard")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Latest update", current["landmark"]["label"])
-    m2.metric("Mortality risk", f'{current["risk"] * 100:.1f}%')
-    m3.metric("Risk category", risk_stratum(current["risk"]))
+    if current is None:
+        st.info("No risk estimate yet. Enter the first laboratory panel and click the update button.")
+    else:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Latest update", current["landmark"]["label"])
+        m2.metric("Mortality risk", f'{current["risk"] * 100:.1f}%')
+        m3.metric("Risk category", risk_stratum(current["risk"]))
 
     st.subheader("Risk trajectory")
-    render_trajectory(trajectory_rows)
-    render_table(
-        ["Landmark", "Hour", "Predicted mortality risk"],
-        [[row["landmark"]["id"], row["hour"], f'{row["risk"] * 100:.1f}%'] for row in trajectory_rows],
-    )
+    render_curve(trajectory_rows)
+    if trajectory_rows:
+        render_table(
+            ["Panel", "Hour", "Predicted mortality risk"],
+            [[row["landmark"]["id"], row["hour"], f'{row["risk"] * 100:.1f}%'] for row in trajectory_rows],
+        )
 
     st.subheader("Main risk drivers")
-    render_table(
-        ["Feature", "Current value", "Model contribution"],
-        [
+    if top_drivers:
+        render_table(
+            ["Feature", "Current value", "Model contribution"],
             [
-                driver["label"],
-                format_value(driver["raw"]),
-                f'{driver["contribution"]:.4f}',
-            ]
-            for driver in top_drivers
-        ],
-    )
+                [
+                    driver["label"],
+                    format_value(driver["raw"]),
+                    f'{driver["contribution"]:.4f}',
+                ]
+                for driver in top_drivers
+            ],
+        )
