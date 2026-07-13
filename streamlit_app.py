@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import altair as alt
 
 
 ROOT = Path(__file__).parent
@@ -23,26 +22,36 @@ def load_config():
 CFG = load_config()
 
 FEATURE_LABELS = {
-    "LDH_latest": "LDH 最新值",
+    "LDH_latest": "Latest LDH",
     "apache2": "APACHE II",
-    "AST_latest": "AST 最新值",
-    "PLT_latest": "PLT 最新值",
-    "UREA_latest": "尿素最新值",
-    "age": "年龄",
-    "LDH_change_from_first": "LDH 较首次变化",
-    "pulse_rate": "脉搏",
-    "CREA_latest": "肌酐最新值",
-    "UREA_measure_n_so_far": "尿素检测次数",
-    "CREA_measure_n_so_far": "肌酐检测次数",
-    "hypertension": "高血压",
-    "CREA_time_since_last": "距上次肌酐检测时间",
-    "UREA_time_since_last": "距上次尿素检测时间",
-    "LYMPH_ABS_latest": "淋巴细胞最新值",
-    "temperature": "体温",
-    "LYMPH_ABS_measure_n_so_far": "淋巴细胞检测次数",
-    "WBC_measure_n_so_far": "白细胞检测次数",
-    "WBC_latest": "WBC 最新值",
-    "PLT_measure_n_so_far": "血小板检测次数",
+    "AST_latest": "Latest AST",
+    "PLT_latest": "Latest platelet count",
+    "UREA_latest": "Latest urea",
+    "age": "Age",
+    "LDH_change_from_first": "LDH change from first value",
+    "pulse_rate": "Pulse rate",
+    "CREA_latest": "Latest creatinine",
+    "UREA_measure_n_so_far": "Number of urea measurements",
+    "CREA_measure_n_so_far": "Number of creatinine measurements",
+    "hypertension": "Hypertension",
+    "CREA_time_since_last": "Time since last creatinine test",
+    "UREA_time_since_last": "Time since last urea test",
+    "LYMPH_ABS_latest": "Latest lymphocyte count",
+    "temperature": "Temperature",
+    "LYMPH_ABS_measure_n_so_far": "Number of lymphocyte measurements",
+    "WBC_measure_n_so_far": "Number of WBC measurements",
+    "WBC_latest": "Latest WBC",
+    "PLT_measure_n_so_far": "Number of platelet measurements",
+}
+
+LAB_LABELS = {
+    "PLT": "Platelet count",
+    "WBC": "White blood cell count",
+    "LYMPH_ABS": "Absolute lymphocyte count",
+    "AST": "AST",
+    "LDH": "LDH",
+    "CREA": "Creatinine",
+    "UREA": "Urea",
 }
 
 EXAMPLE = {
@@ -138,126 +147,142 @@ def calculate_landmark(baseline, matrix, landmark_index):
 def risk_stratum(risk):
     for item in CFG["riskStrata"]:
         if item["min"] <= risk < item["max"]:
-            return item["label"]
-    return CFG["riskStrata"][-1]["label"]
+            return item.get("name", item["label"])
+    return CFG["riskStrata"][-1].get("name", CFG["riskStrata"][-1]["label"])
+
+
+def empty_matrix():
+    return {lab["key"]: {} for lab in CFG["labs"]}
+
+
+def saved_matrix():
+    matrix = empty_matrix()
+    for landmark_id, values in st.session_state.lab_records.items():
+        for lab in CFG["labs"]:
+            matrix[lab["key"]][landmark_id] = values.get(lab["key"])
+    return matrix
+
+
+def recorded_landmark_indices():
+    saved_ids = set(st.session_state.lab_records)
+    return [i for i, item in enumerate(CFG["landmarks"]) if item["id"] in saved_ids]
+
+
+def reset_patient():
+    st.session_state.lab_records = {}
 
 
 st.set_page_config(page_title="SFTS Dynamic Risk Monitor", layout="wide")
+if "lab_records" not in st.session_state:
+    st.session_state.lab_records = {}
+
 st.title("SFTS Dynamic Risk Monitor")
-st.caption("Research prototype only. Not for clinical decision-making.")
+st.caption("Sequential in-hospital mortality risk updating from baseline and repeated laboratory measurements.")
 
 left, right = st.columns([1.05, 1])
 
 with left:
-    st.subheader("Baseline")
+    st.subheader("Baseline profile")
     c1, c2 = st.columns(2)
-    age = c1.number_input("年龄", min_value=0, max_value=120, value=EXAMPLE["age"], step=1)
-    apache2 = c2.number_input("APACHE II", min_value=0, max_value=71, value=EXAMPLE["apache2"], step=1)
-    temperature = c1.number_input("体温, deg C", min_value=30.0, max_value=45.0, value=float(EXAMPLE["temperature"]), step=0.1)
-    pulse_rate = c2.number_input("脉搏, 次/min", min_value=20, max_value=240, value=EXAMPLE["pulse_rate"], step=1)
-    hypertension_label = c1.selectbox("高血压", ["无", "有"], index=int(EXAMPLE["hypertension"]))
-    hypertension = 1 if hypertension_label == "有" else 0
+    age = c1.number_input("Age, years", min_value=0, max_value=120, value=EXAMPLE["age"], step=1)
+    apache2 = c2.number_input("APACHE II score", min_value=0, max_value=71, value=EXAMPLE["apache2"], step=1)
+    temperature = c1.number_input("Temperature, deg C", min_value=30.0, max_value=45.0, value=float(EXAMPLE["temperature"]), step=0.1)
+    pulse_rate = c2.number_input("Pulse rate, beats/min", min_value=20, max_value=240, value=EXAMPLE["pulse_rate"], step=1)
+    hypertension_label = c1.selectbox("Hypertension", ["No", "Yes"], index=int(EXAMPLE["hypertension"]))
+    hypertension = 1 if hypertension_label == "Yes" else 0
 
-    st.subheader("Dynamic update")
-    landmark_labels = [item["label"] for item in CFG["landmarks"]]
-    current_landmark_label = st.select_slider(
-        "当前已获得的最新检测时间点",
-        options=landmark_labels,
-        value=landmark_labels[-1],
-    )
-    current_landmark_index = landmark_labels.index(current_landmark_label)
-    active_landmarks = CFG["landmarks"][: current_landmark_index + 1]
-
-    st.subheader("Laboratory timeline")
-    lab_table = pd.DataFrame(
-        {landmark["id"]: [EXAMPLE[lab["key"]][i] for lab in CFG["labs"]] for i, landmark in enumerate(active_landmarks)},
-        index=[f'{lab["label"]} ({lab["unit"]})' for lab in CFG["labs"]],
-    )
-    edited = st.data_editor(lab_table, use_container_width=True, num_rows="fixed")
-
-baseline = {
-    "age": age,
-    "apache2": apache2,
-    "temperature": temperature,
-    "pulse_rate": pulse_rate,
-    "hypertension": hypertension,
-}
-
-matrix = {}
-for row_label, lab in zip(edited.index, CFG["labs"]):
-    matrix[lab["key"]] = {}
-    for landmark in active_landmarks:
-        matrix[lab["key"]][landmark["id"]] = edited.loc[row_label, landmark["id"]]
-
-results = [calculate_landmark(baseline, matrix, i) for i in range(current_landmark_index + 1)]
-trajectory = pd.DataFrame(
-    {
-        "Landmark": [r["landmark"]["id"] for r in results],
-        "Hour": [r["landmark"]["hour"] for r in results],
-        "Predicted mortality risk": [r["risk"] for r in results],
+    baseline = {
+        "age": age,
+        "apache2": apache2,
+        "temperature": temperature,
+        "pulse_rate": pulse_rate,
+        "hypertension": hypertension,
     }
-)
-current = results[-1]
-top_drivers = (
-    pd.DataFrame(current["contributions"])
-    .assign(abs_contribution=lambda x: x["contribution"].abs())
-    .sort_values("abs_contribution", ascending=False)
-    .head(10)
-)
+
+    next_index = min(len(st.session_state.lab_records), len(CFG["landmarks"]) - 1)
+    current_landmark = CFG["landmarks"][next_index]
+
+    st.subheader("New laboratory update")
+    st.write(f'Current update: **{current_landmark["label"]}**')
+
+    lab_values = {}
+    lc1, lc2 = st.columns(2)
+    for i, lab in enumerate(CFG["labs"]):
+        default_value = float(EXAMPLE[lab["key"]][next_index])
+        target = lc1 if i % 2 == 0 else lc2
+        lab_values[lab["key"]] = target.number_input(
+            f'{LAB_LABELS.get(lab["key"], lab["label"])} ({lab["unit"]})',
+            value=default_value,
+            step=0.01,
+            format="%.3f",
+            key=f'{current_landmark["id"]}_{lab["key"]}',
+        )
+
+    b1, b2 = st.columns([1, 1])
+    if b1.button("Update risk", type="primary", use_container_width=True):
+        st.session_state.lab_records[current_landmark["id"]] = lab_values
+        st.rerun()
+    if b2.button("Reset patient", use_container_width=True):
+        reset_patient()
+        st.rerun()
+
+    st.subheader("Entered laboratory history")
+    if st.session_state.lab_records:
+        history = pd.DataFrame(
+            {
+                item["id"]: [
+                    st.session_state.lab_records.get(item["id"], {}).get(lab["key"])
+                    for lab in CFG["labs"]
+                ]
+                for item in CFG["landmarks"]
+                if item["id"] in st.session_state.lab_records
+            },
+            index=[f'{LAB_LABELS.get(lab["key"], lab["label"])} ({lab["unit"]})' for lab in CFG["labs"]],
+        )
+        st.dataframe(history, use_container_width=True)
+    else:
+        st.info("Enter the first laboratory panel and click Update risk.")
+
+matrix = saved_matrix()
+indices = recorded_landmark_indices()
+results = [calculate_landmark(baseline, matrix, i) for i in indices]
 
 with right:
-    st.subheader("Risk update")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("当前 landmark", current["landmark"]["label"])
-    m2.metric("预测死亡风险", f'{current["risk"] * 100:.1f}%')
-    m3.metric("风险分层", risk_stratum(current["risk"]))
-    risk_chart = (
-        alt.Chart(trajectory)
-        .mark_line(point=True, strokeWidth=3)
-        .encode(
-            x=alt.X(
-                "Landmark:N",
-                sort=[item["id"] for item in active_landmarks],
-                title="Landmark",
-            ),
-            y=alt.Y(
-                "Predicted mortality risk:Q",
-                scale=alt.Scale(domain=[0, 1]),
-                axis=alt.Axis(format="%"),
-                title="Predicted mortality risk",
-            ),
-            tooltip=[
-                alt.Tooltip("Landmark:N", title="Landmark"),
-                alt.Tooltip("Hour:Q", title="Hour"),
-                alt.Tooltip("Predicted mortality risk:Q", title="Risk", format=".1%"),
-            ],
+    st.subheader("Risk dashboard")
+    if not results:
+        st.metric("Latest risk", "Not calculated")
+        st.write("The first risk estimate will appear after the L0 laboratory panel is entered.")
+    else:
+        trajectory = pd.DataFrame(
+            {
+                "Landmark": [r["landmark"]["id"] for r in results],
+                "Hour": [r["landmark"]["hour"] for r in results],
+                "Predicted mortality risk": [r["risk"] for r in results],
+            }
+        ).sort_values("Hour")
+        current = results[-1]
+        top_drivers = (
+            pd.DataFrame(current["contributions"])
+            .assign(abs_contribution=lambda x: x["contribution"].abs())
+            .sort_values("abs_contribution", ascending=False)
+            .head(10)
         )
-        .properties(height=260)
-    )
-    st.altair_chart(risk_chart, use_container_width=True)
-    st.subheader("主要风险贡献")
-    driver_chart = (
-        alt.Chart(top_drivers.sort_values("contribution"))
-        .mark_bar()
-        .encode(
-            x=alt.X("contribution:Q", title="Log-odds contribution"),
-            y=alt.Y("label:N", sort=None, title=None),
-            color=alt.condition(
-                alt.datum.contribution >= 0,
-                alt.value("#1f77b4"),
-                alt.value("#d62728"),
-            ),
-            tooltip=[
-                alt.Tooltip("label:N", title="Feature"),
-                alt.Tooltip("raw:Q", title="Raw value", format=".3g"),
-                alt.Tooltip("contribution:Q", title="Contribution", format=".3f"),
-            ],
-        )
-        .properties(height=320)
-    )
-    st.altair_chart(driver_chart, use_container_width=True)
 
-st.warning(
-    "本网页仅用于论文研究演示，复现已锁定的 Model 3 计算流程。"
-    "模型尚未完成前瞻性临床验证，不能作为独立临床决策工具。"
-)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Latest update", current["landmark"]["label"])
+        m2.metric("Mortality risk", f'{current["risk"] * 100:.1f}%')
+        m3.metric("Risk category", risk_stratum(current["risk"]))
+
+        chart_data = trajectory.set_index("Hour")[["Predicted mortality risk"]]
+        st.line_chart(chart_data, height=260)
+
+        st.subheader("Risk trajectory")
+        display_trajectory = trajectory.copy()
+        display_trajectory["Predicted mortality risk"] = display_trajectory["Predicted mortality risk"].map(lambda x: f"{x * 100:.1f}%")
+        st.dataframe(display_trajectory[["Landmark", "Hour", "Predicted mortality risk"]], use_container_width=True, hide_index=True)
+
+        st.subheader("Main risk drivers")
+        driver_table = top_drivers[["label", "raw", "contribution"]].rename(
+            columns={"label": "Feature", "raw": "Current value", "contribution": "Model contribution"}
+        )
+        st.dataframe(driver_table, use_container_width=True, hide_index=True)
